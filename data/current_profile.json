@@ -1,0 +1,21 @@
+{
+    "id": 2391493,
+    "accountId": "IDlNrARCJUqNlEiP",
+    "accountName": null,
+    "agentId": 1,
+    "nickName": "bimanata",
+    "mailAddress": "bimaikhsan.bi@gmail.com",
+    "mobile": "083854076411",
+    "delFlag": false,
+    "lockFlag": false,
+    "areaId": 1,
+    "currencyCode": "IDR",
+    "currencyName": "\u5370\u5ea6\u5c3c\u897f\u4e9a\u5362\u6bd4\u76fe",
+    "multiple": 4.0,
+    "icon": "Rp",
+    "areaCode": "ID",
+    "custId": "bimanata",
+    "newPlayerFlag": false,
+    "auditStatus": 1,
+    "referralId": "bimanata"
+}

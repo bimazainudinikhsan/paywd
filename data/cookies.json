@@ -1,0 +1,32 @@
+[
+    {
+        "domain": ".wdbos.com",
+        "expiry": 1778584335,
+        "httpOnly": false,
+        "name": "_fbp",
+        "path": "/",
+        "sameSite": "Lax",
+        "secure": false,
+        "value": "fb.1.1770799332803.58849962906003616"
+    },
+    {
+        "domain": ".wdbos.com",
+        "expiry": 1805368255,
+        "httpOnly": false,
+        "name": "_ga_LLW4FXWKXP",
+        "path": "/",
+        "sameSite": "Lax",
+        "secure": false,
+        "value": "GS2.1.s1770806770$o2$g1$t1770808255$j60$l0$h0"
+    },
+    {
+        "domain": ".wdbos.com",
+        "expiry": 1805368255,
+        "httpOnly": false,
+        "name": "_ga",
+        "path": "/",
+        "sameSite": "Lax",
+        "secure": false,
+        "value": "GA1.1.1167732398.1770799331"
+    }
+]

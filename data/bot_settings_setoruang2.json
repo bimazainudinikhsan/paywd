@@ -1,0 +1,9 @@
+{
+    "welcome_message": "Halo! Selamat datang.",
+    "guest_access": true,
+    "dashboard_title": "\u2139\ufe0f Dashboard User",
+    "payment_success_message": "\u2705 Pembayaran Berhasil! Terima kasih.",
+    "payment_success_buttons": [],
+    "use_qris_logo": false,
+    "qris_logo_path": "assets/setoruang2/logo.png"
+}
