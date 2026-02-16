@@ -1010,16 +1010,17 @@ async def poll_deposit_status(chat_id, order_id, context, message_id, nominal=0)
             url = f"https://wdbos.com/auth/commonpay/ida/common/queryOrderIsPayment?l=id&orderId={order_id}"
             resp = await asyncio.to_thread(wd_bot.session.get, url, headers=wd_bot.api_headers)
             
-            # Check for Session Expiry / Auth Failure
             if resp.status_code == 401 or (resp.status_code == 200 and not resp.json().get('success') and 'login' in str(resp.json().get('message', '')).lower()):
                 print(f"[!] Polling: Session expired for {order_id}. Re-logging...")
                 
-                # Force re-login attempt
                 creds = wd_bot.get_user_by_username(wd_bot.current_username)
-                if creds:
-                    await asyncio.to_thread(wd_bot.login_api, creds['username'], creds['password'])
-                    # Retry request
+                username = creds.get('username') if creds else None
+                password = creds.get('password') if creds else None
+                if username and password:
+                    await asyncio.to_thread(wd_bot.login_api, username, password)
                     resp = await asyncio.to_thread(wd_bot.session.get, url, headers=wd_bot.api_headers)
+                else:
+                    print(f"[!] Polling: credentials incomplete for {wd_bot.current_username}, skip auto re-login")
 
             if resp.status_code == 200:
                 d = resp.json()
