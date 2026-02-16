@@ -1229,20 +1229,16 @@ async def manage_action_handler(update: Update, context: ContextTypes.DEFAULT_TY
         # Let's check main.py briefly? 
         # Assumption: WDBot methods handle reading credentials if needed or we pass it.
         
-        # Let's try to login explicitly using the password we have in target_user_config
         password = target_user_config.get('password', '')
         
-        # Attempt login
         success = False
         try:
-            # Try token login first (fast)
             if new_bot.load_token():
                 if new_bot.check_token_valid():
                     success = True
             
-            # If token failed, try password login
             if not success and password:
-                if new_bot.login_api(password):
+                if new_bot.login_api(username, password):
                     success = True
                     
         except Exception as e:
