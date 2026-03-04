@@ -3,6 +3,7 @@ import json
 import os
 import base64
 import datetime
+import tempfile
 from urllib.parse import urlparse
 # import requests  <-- Replaced with curl_cffi for SSL Fingerprint Bypass
 from curl_cffi import requests
@@ -55,13 +56,25 @@ class WDBot:
         self.current_username = username
         self.credentials_path = 'config/credentials.json'
 
-        # Path untuk menyimpan profil browser agar login tersimpan (Auto Login)
-        # Jika username ada, gunakan folder khusus agar tidak bentrok antar user
+        # Path profil browser harus writable di semua environment.
+        # Pada Vercel/AWS Lambda, /var/task read-only, jadi gunakan /tmp.
+        runtime_root = os.getenv("WDBOT_RUNTIME_DIR", "").strip()
+        if not runtime_root:
+            if os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or os.getenv("LAMBDA_TASK_ROOT"):
+                runtime_root = os.path.join(tempfile.gettempdir(), "wdbot")
+            else:
+                runtime_root = os.getcwd()
+
         profile_dir_name = f"chrome_data_{username}" if username else "chrome_data"
-        self.profile_path = os.path.join(os.getcwd(), profile_dir_name)
-        
-        if not os.path.exists(self.profile_path):
-            os.makedirs(self.profile_path)
+        self.profile_path = os.path.join(runtime_root, profile_dir_name)
+
+        try:
+            os.makedirs(self.profile_path, exist_ok=True)
+        except Exception:
+            # Last fallback for restrictive filesystem.
+            fallback_root = os.path.join(tempfile.gettempdir(), "wdbot")
+            self.profile_path = os.path.join(fallback_root, profile_dir_name)
+            os.makedirs(self.profile_path, exist_ok=True)
 
     def _api_url(self, path):
         if not path.startswith('/'):
