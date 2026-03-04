@@ -1528,35 +1528,37 @@ async def auto_login_loop(wd_bot):
         
         await asyncio.sleep(300) # Check every 5 minutes
 
-async def run_bot_for_user(user_config):
+def create_application_for_user(user_config, ensure_login_on_start=True, enable_background_tasks=True):
     username = user_config['username']
     token = user_config.get('telegram_bot_token')
     admin_id = user_config.get('telegram_admin_id')
-    
+
     if not token or not admin_id:
         print(f"[!] User {username} tidak memiliki konfigurasi Telegram Bot (token/admin_id). Skipping.")
         return None
 
-    print(f"[*] Starting Bot for User: {username} (Admin ID: {admin_id})")
-    
+    print(f"[*] Preparing Bot Application for User: {username} (Admin ID: {admin_id})")
+
     # Initialize WDBot for this user
     wd_bot = WDBot(username=username)
-    # Try to ensure login/session is active
-    wd_bot.ensure_logged_in()
-    
+    if ensure_login_on_start:
+        # Try to ensure login/session is active
+        wd_bot.ensure_logged_in()
+
     # Configure connection timeouts
     request = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0, write_timeout=60.0)
 
     # Build Application
     application = Application.builder().token(token).request(request).build()
-    
+
     # Inject data
     application.bot_data['wd_bot'] = wd_bot
     application.bot_data['admin_id'] = admin_id
     application.bot_data['active_deposits'] = set()
 
     # Start Auto-Login Background Task
-    application.create_task(auto_login_loop(wd_bot))
+    if enable_background_tasks:
+        application.create_task(auto_login_loop(wd_bot))
 
     # Handlers
     conv_deposit = ConversationHandler(
@@ -1620,6 +1622,18 @@ async def run_bot_for_user(user_config):
     application.add_handler(conv_manage)
     application.add_handler(conv_settings)
     application.add_handler(CallbackQueryHandler(button_handler))
+
+    return application
+
+async def run_bot_for_user(user_config):
+    username = user_config['username']
+    application = create_application_for_user(
+        user_config,
+        ensure_login_on_start=True,
+        enable_background_tasks=True,
+    )
+    if not application:
+        return None
     
     # Initialize and Start
     await application.initialize()
