@@ -3,8 +3,10 @@ import json
 import os
 import base64
 import datetime
+from urllib.parse import urlparse
 # import requests  <-- Replaced with curl_cffi for SSL Fingerprint Bypass
 from curl_cffi import requests
+from curl_cffi.const import CurlOpt
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.chrome.options import Options
@@ -32,13 +34,20 @@ class WDBot:
         self.token = None
         # Gunakan impersonate="chrome" agar TLS Fingerprint terlihat seperti browser asli
         self.session = requests.Session(impersonate="chrome")
-        self.base_url = "https://wdbos.com/#/index?category=hot"
+        # Default secure; auto-fallback to verify=False if server cert chain is broken.
+        self.ssl_verify = os.getenv("WDBOT_SSL_VERIFY", "true").strip().lower() in ("1", "true", "yes", "on")
+        self._ssl_fallback_triggered = False
+        self.base_domain = os.getenv("WDBOT_DOMAIN", "wdbos.com").strip() or "wdbos.com"
+        self.base_origin = f"https://{self.base_domain}"
+        self.enable_dns_bypass = os.getenv("WDBOT_DNS_BYPASS", "true").strip().lower() in ("1", "true", "yes", "on")
+        self._curl_resolve_entries = self._resolve_host_entries(self.base_domain) if self.enable_dns_bypass else []
+        self.base_url = f"{self.base_origin}/#/index?category=hot"
         self.api_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
             "Content-Type": "application/json",
             "Accept": "application/json, text/plain, */*",
-            "Origin": "https://wdbos.com",
-            "Referer": "https://wdbos.com/",
+            "Origin": self.base_origin,
+            "Referer": f"{self.base_origin}/",
             "X-Requested-With": "XMLHttpRequest"
         }
         
@@ -52,6 +61,116 @@ class WDBot:
         
         if not os.path.exists(self.profile_path):
             os.makedirs(self.profile_path)
+
+    def _api_url(self, path):
+        if not path.startswith('/'):
+            path = f'/{path}'
+        return f"{self.base_origin}{path}"
+
+    def _resolve_host_entries(self, domain):
+        """
+        Resolve domain with DNS-over-HTTPS and prepare CURLOPT_RESOLVE entries
+        so requests bypass local DNS hijack/block pages.
+        """
+        if not domain:
+            return []
+
+        doh_urls = [
+            f"https://cloudflare-dns.com/dns-query?name={domain}&type=A",
+            f"https://dns.google/resolve?name={domain}&type=A",
+        ]
+        headers = {"Accept": "application/dns-json"}
+        ips = []
+
+        for doh_url in doh_urls:
+            try:
+                resp = self.session.get(
+                    doh_url,
+                    headers=headers,
+                    timeout=15,
+                    verify=False,
+                    impersonate="chrome",
+                )
+                data = resp.json()
+                answers = data.get("Answer", []) if isinstance(data, dict) else []
+                for answer in answers:
+                    ip = answer.get("data")
+                    if isinstance(ip, str) and ip.count(".") == 3 and ip not in ips:
+                        ips.append(ip)
+                if ips:
+                    break
+            except Exception:
+                continue
+
+        if ips:
+            entries = [f"{domain}:443:{ip}" for ip in ips]
+            print(f"{Fore.CYAN}[i] DNS bypass aktif untuk {domain} -> {', '.join(ips[:2])}{Style.RESET_ALL}")
+            return entries
+
+        print(f"{Fore.YELLOW}[!] DNS bypass tidak menemukan IP untuk {domain}. Menggunakan DNS default.{Style.RESET_ALL}")
+        return []
+
+    def _safe_request(self, method, url, **kwargs):
+        """
+        Perform request with automatic SSL verify fallback for broken certificate chains.
+        """
+        if 'verify' not in kwargs:
+            kwargs['verify'] = self.ssl_verify
+
+        host = (urlparse(url).hostname or "").lower()
+        use_global_request = False
+        if host == self.base_domain.lower() and self._curl_resolve_entries:
+            curl_options = dict(kwargs.get("curl_options", {}))
+            if CurlOpt.RESOLVE not in curl_options:
+                curl_options[CurlOpt.RESOLVE] = self._curl_resolve_entries
+            kwargs["curl_options"] = curl_options
+            use_global_request = True
+
+        def do_request():
+            if use_global_request:
+                req_kwargs = dict(kwargs)
+                req_kwargs.setdefault("impersonate", "chrome")
+                req_kwargs.setdefault("cookies", self.session.cookies)
+
+                # Keep session-level auth headers (especially X-Access-Token) when
+                # using global requests.request for CURLOPT_RESOLVE DNS bypass.
+                merged_headers = dict(self.session.headers)
+                custom_headers = req_kwargs.get("headers") or {}
+                merged_headers.update(custom_headers)
+                req_kwargs["headers"] = merged_headers
+
+                response = requests.request(method, url, **req_kwargs)
+                try:
+                    self.session.cookies.update(response.cookies)
+                except Exception:
+                    pass
+                return response
+            return self.session.request(method, url, **kwargs)
+
+        try:
+            return do_request()
+        except Exception as e:
+            error_text = str(e).lower()
+            is_ssl_verify_error = (
+                "curl: (60)" in error_text
+                or "ssl certificate problem" in error_text
+                or "certificate verify failed" in error_text
+            )
+
+            if kwargs.get('verify') and is_ssl_verify_error:
+                self.ssl_verify = False
+                kwargs['verify'] = False
+
+                if not self._ssl_fallback_triggered:
+                    print(
+                        f"{Fore.YELLOW}[!] SSL verify gagal (curl:60). "
+                        f"Menggunakan verify=False untuk request berikutnya.{Style.RESET_ALL}"
+                    )
+                    self._ssl_fallback_triggered = True
+
+                return do_request()
+
+            raise
 
     # ==========================================
     # MENU 1: SNIFFING (BROWSER)
@@ -150,7 +269,7 @@ class WDBot:
                         is_relevant = False
                         if res_type in ['XHR', 'Fetch', 'WebSocket']:
                             is_relevant = True
-                        elif 'wdbos.com' in url or '24dgame.com' in url:
+                        elif self.base_domain in url or 'wdbos.com' in url or '24dgame.com' in url:
                             is_relevant = True
                         
                         if is_relevant:
@@ -182,7 +301,7 @@ class WDBot:
                         is_relevant = False
                         if res_type in ['XHR', 'Fetch', 'WebSocket']:
                             is_relevant = True
-                        elif 'wdbos.com' in url or '24dgame.com' in url:
+                        elif self.base_domain in url or 'wdbos.com' in url or '24dgame.com' in url:
                             is_relevant = True
 
                         if is_relevant:
@@ -251,11 +370,22 @@ class WDBot:
                 json.dump(local_storage, f, indent=4)
             
             token = local_storage.get('token') or local_storage.get('X-Access-Token')
-            if not token and 'wdbos.com' in local_storage:
-                try:
-                    wdbos_data = json.loads(local_storage['wdbos.com'])
-                    token = wdbos_data.get('token')
-                except: pass
+            if not token:
+                storage_keys = []
+                if self.base_domain:
+                    storage_keys.append(self.base_domain)
+                if 'wdbos.com' not in storage_keys:
+                    storage_keys.append('wdbos.com')
+
+                for storage_key in storage_keys:
+                    if storage_key in local_storage:
+                        try:
+                            wdbos_data = json.loads(local_storage[storage_key])
+                            token = wdbos_data.get('token')
+                            if token:
+                                break
+                        except:
+                            pass
             
             if token:
                  self.save_token(token)
@@ -425,7 +555,7 @@ class WDBot:
         # Clear existing cookies to prevent session bleeding
         self.session.cookies.clear()
         
-        url = "https://wdbos.com/auth/sys/gameLogin?l=id"
+        url = self._api_url("/auth/sys/gameLogin?l=id")
         payload = {
             "accessCode": "",
             "accessType": 2,
@@ -437,7 +567,7 @@ class WDBot:
         
         try:
             # Set timeout to 60 seconds to avoid connection timeout
-            resp = self.session.post(url, json=payload, headers=self.api_headers, timeout=60)
+            resp = self._safe_request("POST", url, json=payload, headers=self.api_headers, timeout=60)
             if resp.status_code == 200:
                 try:
                     data = resp.json()
@@ -516,8 +646,8 @@ class WDBot:
 
     def get_wallet_info(self):
         try:
-            url = "https://wdbos.com/auth/playerInfo/getWalletInfo?l=id"
-            resp = self.session.get(url, headers=self.api_headers)
+            url = self._api_url("/auth/playerInfo/getWalletInfo?l=id")
+            resp = self._safe_request("GET", url, headers=self.api_headers)
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get('success'):
@@ -608,8 +738,8 @@ class WDBot:
         base_info_result = {}
         real_name = '-'
         try:
-            url = "https://wdbos.com/auth/commonpay/pay/common/getPlayerBaseInfo?l=id"
-            resp = self.session.get(url, headers=self.api_headers)
+            url = self._api_url("/auth/commonpay/pay/common/getPlayerBaseInfo?l=id")
+            resp = self._safe_request("GET", url, headers=self.api_headers)
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get('success'):
@@ -662,8 +792,8 @@ class WDBot:
         # --- 4. Info Wallet (Live Fetch) ---
         print(f"\n{Fore.CYAN}--- Info Wallet (Live Fetch) ---{Style.RESET_ALL}")
         try:
-            url = "https://wdbos.com/auth/playerInfo/getWalletInfo?l=id"
-            resp = self.session.get(url, headers=self.api_headers)
+            url = self._api_url("/auth/playerInfo/getWalletInfo?l=id")
+            resp = self._safe_request("GET", url, headers=self.api_headers)
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get('success'):
@@ -698,8 +828,8 @@ class WDBot:
         
         try:
             print(f"{Fore.YELLOW}[i] Mengecek status QRIS Server...{Style.RESET_ALL}")
-            url_active = "https://wdbos.com/auth/commonpay/ida/common/getQrisActive?l=id"
-            resp = self.session.get(url_active, headers=self.api_headers)
+            url_active = self._api_url("/auth/commonpay/ida/common/getQrisActive?l=id")
+            resp = self._safe_request("GET", url_active, headers=self.api_headers)
             
             if resp.status_code == 200:
                 data = resp.json()
@@ -735,14 +865,14 @@ class WDBot:
 
         # 3. Send Deposit Request
         print(f"{Fore.CYAN}[i] Memproses deposit sebesar Rp {nominal:,} ...{Style.RESET_ALL}")
-        url_deposit = "https://wdbos.com/auth/commonpay/ida/common/getYukkQris?l=id"
+        url_deposit = self._api_url("/auth/commonpay/ida/common/getYukkQris?l=id")
         payload = {
             "nominal": nominal,
             "qrisType": qris_type
         }
 
         try:
-            resp = self.session.post(url_deposit, json=payload, headers=self.api_headers)
+            resp = self._safe_request("POST", url_deposit, json=payload, headers=self.api_headers)
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get('success'):
@@ -776,8 +906,8 @@ class WDBot:
                     
                     while (time.time() - start_time) < timeout_duration:
                         try:
-                            url_status = f"https://wdbos.com/auth/commonpay/ida/common/queryOrderIsPayment?l=id&orderId={order_id}"
-                            resp_status = self.session.get(url_status, headers=self.api_headers)
+                            url_status = self._api_url(f"/auth/commonpay/ida/common/queryOrderIsPayment?l=id&orderId={order_id}")
+                            resp_status = self._safe_request("GET", url_status, headers=self.api_headers)
                             
                             if resp_status.status_code == 200:
                                 data_status = resp_status.json()

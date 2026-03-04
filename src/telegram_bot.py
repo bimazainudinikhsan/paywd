@@ -14,14 +14,18 @@ import warnings
 from dotenv import load_dotenv
 from aiohttp import web
 
-# Load .env file explicitly
-load_dotenv()
+# Resolve paths relative to this file so script can run from any working directory
+SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SRC_DIR)
+
+# Load .env file explicitly from project root
+load_dotenv(os.path.join(PROJECT_ROOT, '.env'))
 
 # Set SSL Certificate for Windows/HTTPErrors
 os.environ['SSL_CERT_FILE'] = certifi.where()
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import BadRequest
+from telegram.error import BadRequest, Conflict
 from telegram.request import HTTPXRequest
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 from telegram.warnings import PTBUserWarning
@@ -30,7 +34,8 @@ from telegram.warnings import PTBUserWarning
 warnings.filterwarnings("ignore", category=PTBUserWarning)
 
 # Add src to path to import main
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+if SRC_DIR not in sys.path:
+    sys.path.append(SRC_DIR)
 from main import WDBot
 
 # Logging setup
@@ -323,8 +328,13 @@ async def show_analysis(query, context):
     real_name = '-'
     bank_info_str = ""
     try:
-        url_base = "https://wdbos.com/auth/commonpay/pay/common/getPlayerBaseInfo?l=id"
-        resp_base = wd_bot.session.get(url_base, headers=wd_bot.api_headers)
+        url_base = wd_bot._api_url("/auth/commonpay/pay/common/getPlayerBaseInfo?l=id")
+        resp_base = await asyncio.to_thread(
+            wd_bot._safe_request,
+            "GET",
+            url_base,
+            headers=wd_bot.api_headers
+        )
         if resp_base.status_code == 200:
             data_base = resp_base.json()
             if data_base.get('success'):
@@ -346,6 +356,10 @@ async def show_analysis(query, context):
                         bank_info_str += f"- Code: `{bank.get('bankCode')}`\n\n"
                 else:
                     bank_info_str += f"⚠️ Belum ada data bank tersimpan.\n\n"
+            else:
+                bank_info_str += f"⚠️ Gagal fetch base info: {data_base.get('message')}\n\n"
+        else:
+            bank_info_str += f"⚠️ Gagal fetch base info (HTTP {resp_base.status_code}).\n\n"
     except Exception as e:
         bank_info_str += f"⚠️ Gagal fetch base info: {e}\n\n"
 
@@ -402,8 +416,13 @@ async def show_analysis(query, context):
 
     # --- 3. Wallet Info ---
     try:
-        url = "https://wdbos.com/auth/playerInfo/getWalletInfo?l=id"
-        resp = wd_bot.session.get(url, headers=wd_bot.api_headers)
+        url = wd_bot._api_url("/auth/playerInfo/getWalletInfo?l=id")
+        resp = await asyncio.to_thread(
+            wd_bot._safe_request,
+            "GET",
+            url,
+            headers=wd_bot.api_headers
+        )
         if resp.status_code == 200:
             data = resp.json()
             if data.get('success'):
@@ -414,6 +433,8 @@ async def show_analysis(query, context):
                 report += f"- Saldo: `{money + reward:,.0f}`\n\n"
             else:
                 report += f"⚠️ Gagal fetch wallet: {data.get('message')}\n\n"
+        else:
+            report += f"⚠️ Gagal fetch wallet (HTTP {resp.status_code}).\n\n"
     except Exception as e:
         report += f"⚠️ Error Wallet: {e}\n\n"
 
@@ -889,8 +910,13 @@ async def deposit_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1. Check QRIS Type (Simplified)
     qris_type = "P2M"
     try:
-        url_active = "https://wdbos.com/auth/commonpay/ida/common/getQrisActive?l=id"
-        resp = wd_bot.session.get(url_active, headers=wd_bot.api_headers)
+        url_active = wd_bot._api_url("/auth/commonpay/ida/common/getQrisActive?l=id")
+        resp = await asyncio.to_thread(
+            wd_bot._safe_request,
+            "GET",
+            url_active,
+            headers=wd_bot.api_headers
+        )
         if resp.status_code == 200:
             d = resp.json()
             if d.get('success') and d.get('result'):
@@ -898,11 +924,17 @@ async def deposit_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except: pass
 
     # 2. Request Deposit
-    url_deposit = "https://wdbos.com/auth/commonpay/ida/common/getYukkQris?l=id"
+    url_deposit = wd_bot._api_url("/auth/commonpay/ida/common/getYukkQris?l=id")
     payload = {"nominal": nominal, "qrisType": qris_type}
     
     try:
-        resp = wd_bot.session.post(url_deposit, json=payload, headers=wd_bot.api_headers)
+        resp = await asyncio.to_thread(
+            wd_bot._safe_request,
+            "POST",
+            url_deposit,
+            json=payload,
+            headers=wd_bot.api_headers
+        )
         if resp.status_code == 200:
             data = resp.json()
             if data.get('success'):
@@ -1007,8 +1039,13 @@ async def poll_deposit_status(chat_id, order_id, context, message_id, nominal=0)
             return
 
         try:
-            url = f"https://wdbos.com/auth/commonpay/ida/common/queryOrderIsPayment?l=id&orderId={order_id}"
-            resp = await asyncio.to_thread(wd_bot.session.get, url, headers=wd_bot.api_headers)
+            url = wd_bot._api_url(f"/auth/commonpay/ida/common/queryOrderIsPayment?l=id&orderId={order_id}")
+            resp = await asyncio.to_thread(
+                wd_bot._safe_request,
+                "GET",
+                url,
+                headers=wd_bot.api_headers
+            )
             
             if resp.status_code == 401 or (resp.status_code == 200 and not resp.json().get('success') and 'login' in str(resp.json().get('message', '')).lower()):
                 print(f"[!] Polling: Session expired for {order_id}. Re-logging...")
@@ -1018,7 +1055,12 @@ async def poll_deposit_status(chat_id, order_id, context, message_id, nominal=0)
                 password = creds.get('password') if creds else None
                 if username and password:
                     await asyncio.to_thread(wd_bot.login_api, username, password)
-                    resp = await asyncio.to_thread(wd_bot.session.get, url, headers=wd_bot.api_headers)
+                    resp = await asyncio.to_thread(
+                        wd_bot._safe_request,
+                        "GET",
+                        url,
+                        headers=wd_bot.api_headers
+                    )
                 else:
                     print(f"[!] Polling: credentials incomplete for {wd_bot.current_username}, skip auto re-login")
 
@@ -1315,6 +1357,60 @@ async def manage_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # Global registry for running bots
 RUNNING_APPS = {}
+MAIN_STOP_EVENT = None
+
+def request_process_shutdown(reason):
+    global MAIN_STOP_EVENT
+    if MAIN_STOP_EVENT and not MAIN_STOP_EVENT.is_set():
+        print(f"[!] Shutdown requested: {reason}")
+        MAIN_STOP_EVENT.set()
+
+async def stop_application_instance(application, username, reason, trigger_global_stop=False):
+    if application.bot_data.get('_stop_in_progress'):
+        return
+    application.bot_data['_stop_in_progress'] = True
+
+    print(f"[!] Stopping bot instance '{username}': {reason}")
+    try:
+        if application.updater and application.updater.running:
+            await application.updater.stop()
+    except Exception as e:
+        print(f"[!] Error stopping updater for {username}: {e}")
+
+    try:
+        if application.running:
+            await application.stop()
+    except Exception as e:
+        print(f"[!] Error stopping application for {username}: {e}")
+
+    try:
+        await application.shutdown()
+    except Exception as e:
+        print(f"[!] Error shutting down application for {username}: {e}")
+
+    RUNNING_APPS.pop(username, None)
+
+    if trigger_global_stop:
+        request_process_shutdown(f"Polling conflict detected for '{username}'.")
+
+def make_polling_error_callback(application, username):
+    def _on_polling_error(error):
+        if isinstance(error, Conflict):
+            print(f"[!] Conflict detected for '{username}'. Another server is polling this bot token.")
+            # In single-server mode, this process must stop so only one server remains active.
+            application.create_task(
+                stop_application_instance(
+                    application,
+                    username,
+                    "Another server is already active for this bot.",
+                    trigger_global_stop=True,
+                )
+            )
+            return
+
+        print(f"[!] Polling error for '{username}': {error}")
+
+    return _on_polling_error
 
 async def restart_user_bot(username, update_msg_func=None):
     """
@@ -1536,7 +1632,17 @@ async def run_bot_for_user(user_config):
     # Initialize and Start
     await application.initialize()
     await application.start()
-    await application.updater.start_polling()
+    polling_error_callback = make_polling_error_callback(application, username)
+    try:
+        await application.updater.start_polling(error_callback=polling_error_callback)
+    except Conflict:
+        await stop_application_instance(
+            application,
+            username,
+            "Another server is already polling during startup.",
+            trigger_global_stop=True,
+        )
+        return None
     
     return application
 
@@ -1587,11 +1693,20 @@ async def start_keep_alive_server():
         app_url = os.environ.get("APP_URL")
         if app_url:
             asyncio.create_task(self_ping_loop(app_url))
+        return runner
             
     except Exception as e:
         print(f"[!] Failed to start web server: {e}")
+        try:
+            await runner.cleanup()
+        except Exception:
+            pass
+        return None
 
 async def main_async():
+    global MAIN_STOP_EVENT
+    MAIN_STOP_EVENT = asyncio.Event()
+
     # Load users
     creds_path = 'config/credentials.json'
     users = []
@@ -1665,20 +1780,33 @@ async def main_async():
     print("[i] Menunggu request di background. Tekan CTRL+C untuk stop.")
     
     # Start Keep-Alive Server
-    await start_keep_alive_server()
+    web_runner = await start_keep_alive_server()
     
     # Keep alive
-    stop_event = asyncio.Event()
     try:
-        await stop_event.wait()
+        await MAIN_STOP_EVENT.wait()
     except KeyboardInterrupt:
+        pass
+    finally:
         print("Stopping bots...")
-        for app in list(RUNNING_APPS.values()):
-            await app.updater.stop()
-            await app.stop()
-            await app.shutdown()
+        for username, app in list(RUNNING_APPS.items()):
+            await stop_application_instance(
+                app,
+                username,
+                "Main process shutdown.",
+                trigger_global_stop=False,
+            )
+
+        if web_runner:
+            try:
+                await web_runner.cleanup()
+            except Exception as e:
+                print(f"[!] Error stopping keep-alive server: {e}")
 
 def main():
+    # Keep all relative file paths (config/data/logs) anchored to project root.
+    if os.getcwd() != PROJECT_ROOT:
+        os.chdir(PROJECT_ROOT)
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:
