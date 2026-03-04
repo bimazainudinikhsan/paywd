@@ -37,6 +37,7 @@ warnings.filterwarnings("ignore", category=PTBUserWarning)
 if SRC_DIR not in sys.path:
     sys.path.append(SRC_DIR)
 from main import WDBot
+from storage_backend import read_json_file, write_json_file, json_exists
 
 # Logging setup
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -58,11 +59,9 @@ def get_settings_file(username=None):
 
 def load_bot_settings(username=None):
     filepath = get_settings_file(username)
-    if os.path.exists(filepath):
-        try:
-            with open(filepath, 'r') as f:
-                return json.load(f)
-        except: pass
+    data = read_json_file(filepath, default=None)
+    if isinstance(data, dict):
+        return data
     return {
         "welcome_message": "Halo! Selamat datang.", 
         "guest_access": True,
@@ -75,8 +74,7 @@ def load_bot_settings(username=None):
 
 def save_bot_settings(settings, username=None):
     filepath = get_settings_file(username)
-    with open(filepath, 'w') as f:
-        json.dump(settings, f, indent=4)
+    write_json_file(filepath, settings)
 
 # NUCLEAR OPTION: Force disable SSL verification globally
 def create_insecure_ssl_context(*args, **kwargs):
@@ -241,17 +239,12 @@ def get_history_file(username):
 
 def load_history(username):
     file_path = get_history_file(username)
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except: return []
-    return []
+    data = read_json_file(file_path, default=[])
+    return data if isinstance(data, list) else []
 
 def save_history(username, history):
     file_path = get_history_file(username)
-    with open(file_path, 'w', encoding='utf-8') as f:
-        json.dump(history, f, indent=4)
+    write_json_file(file_path, history)
 
 def add_transaction(username, transaction):
     history = load_history(username)
@@ -372,7 +365,7 @@ async def show_analysis(query, context):
     
     if wd_bot.current_username:
         user_profile = f'data/profile_{wd_bot.current_username}.json'
-        if os.path.exists(user_profile):
+        if json_exists(user_profile):
             profile_path = user_profile
         else:
             # Auto-heal: Try to login silently to fetch profile if missing
@@ -381,7 +374,7 @@ async def show_analysis(query, context):
                 if user_creds and user_creds.get('password'):
                     # Perform login to sync data
                     if wd_bot.login_api(wd_bot.current_username, user_creds.get('password')):
-                        if os.path.exists(user_profile):
+                        if json_exists(user_profile):
                             profile_path = user_profile
             except Exception as e:
                 print(f"[!] Auto-heal profile failed: {e}")
@@ -389,10 +382,9 @@ async def show_analysis(query, context):
             if not profile_path:
                 profile_path = None
 
-    if profile_path and os.path.exists(profile_path):
+    if profile_path and json_exists(profile_path):
         try:
-            with open(profile_path, 'r') as f:
-                pInfo = json.load(f)
+            pInfo = read_json_file(profile_path, default={})
             
             # Double check (paranoia check) - though pInfo usually doesn't have username
             report += f"Nick     : `{pInfo.get('nickName')}`\n"
@@ -1707,19 +1699,21 @@ async def main_async():
     global MAIN_STOP_EVENT
     MAIN_STOP_EVENT = asyncio.Event()
 
-    # Load users
-    creds_path = 'config/credentials.json'
+    # Load users from storage backend (Firebase RTDB or local fallback)
     users = []
-    
-    if os.path.exists(creds_path):
-        try:
-            with open(creds_path, 'r') as f:
-                data = json.load(f)
-            users = data.get('users', [])
-        except Exception as e:
-            print(f"[!] Warning: Gagal membaca credentials.json: {e}")
-    else:
-        print("[!] Warning: config/credentials.json tidak ditemukan. Menggunakan environment variables saja.")
+    try:
+        creds_data = read_json_file('config/credentials.json', default={})
+        if isinstance(creds_data, dict):
+            users = creds_data.get('users', [])
+        elif isinstance(creds_data, list):
+            users = creds_data
+        else:
+            users = []
+    except Exception as e:
+        print(f"[!] Warning: Gagal membaca data credentials: {e}")
+        users = []
+    if not users:
+        print("[!] Warning: Data credentials kosong/tidak ditemukan. Menggunakan environment variables saja jika tersedia.")
     
     # --- AUTO-INJECT FROM .ENV (For Owner) ---
     # If there are users but they don't have bot tokens, let's assume the first user 
@@ -1773,7 +1767,7 @@ async def main_async():
 
     if not apps:
         print("[!] Warning: Tidak ada bot yang berhasil dijalankan.")
-        print("[i] Pastikan telegram_bot_token diisi di config/credentials.json atau .env")
+        print("[i] Pastikan telegram_bot_token tersimpan di Firebase/local credentials atau .env")
         # Do not return, keep running for web server
 
     print(f"[*] {len(apps)} Bot Telegram berjalan...")

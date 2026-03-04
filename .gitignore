@@ -32,4 +32,6 @@ chrome_data_*/
 .env
 data/profile_*.json
 config/auth_token_*.txt
+serviceAccountKey.json
+config/serviceAccountKey.json
 *.log

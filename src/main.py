@@ -17,6 +17,7 @@ from colorama import init, Fore, Style
 
 import urllib3
 import qrcode
+from storage_backend import read_json_file, write_json_file
 
 
 # Initialize colorama
@@ -361,13 +362,11 @@ class WDBot:
         try:
             selenium_cookies = self.driver.get_cookies()
             cookie_file = f'data/cookies_{self.current_username}.json' if self.current_username else 'data/cookies.json'
-            with open(cookie_file, 'w', encoding='utf-8') as f:
-                json.dump(selenium_cookies, f, indent=4)
+            write_json_file(cookie_file, selenium_cookies)
             
             local_storage = self.driver.execute_script("return window.localStorage;")
             ls_file = f'data/local_storage_{self.current_username}.json' if self.current_username else 'data/local_storage.json'
-            with open(ls_file, 'w', encoding='utf-8') as f:
-                json.dump(local_storage, f, indent=4)
+            write_json_file(ls_file, local_storage)
             
             token = local_storage.get('token') or local_storage.get('X-Access-Token')
             if not token:
@@ -401,13 +400,11 @@ class WDBot:
     # ==========================================
     def load_all_credentials(self):
         """Loads all credentials from credentials.json, migrating old format if needed."""
-        if not os.path.exists(self.credentials_path):
-            return []
-        
         try:
-            with open(self.credentials_path, 'r') as f:
-                data = json.load(f)
-            
+            data = read_json_file(self.credentials_path, default=None)
+            if data is None:
+                return []
+
             # Check if old format (dict) or new format (list of dicts or dict with 'users' key)
             if isinstance(data, dict):
                 if 'users' in data:
@@ -417,15 +414,14 @@ class WDBot:
                     return [data]
             elif isinstance(data, list):
                 return data
-            
+
             return []
         except Exception:
             return []
 
     def save_all_credentials(self, users):
         """Saves list of users to credentials.json in new format."""
-        with open(self.credentials_path, 'w') as f:
-            json.dump({'users': users}, f, indent=4)
+        write_json_file(self.credentials_path, {'users': users})
 
     def get_user_by_username(self, username):
         users = self.load_all_credentials()
@@ -587,14 +583,12 @@ class WDBot:
                                 
                                 # Simpan ke file spesifik user
                                 profile_file = f'data/profile_{username}.json'
-                                with open(profile_file, 'w') as f:
-                                    json.dump(player_info, f, indent=4)
+                                write_json_file(profile_file, player_info)
                                     
                                 # Juga simpan ke global current_profile.json (hanya untuk backward compatibility/sniffing)
                                 # Tapi hati-hati, ini bisa bikin conflict kalau multi-bot. 
                                 # Sebaiknya dihindari untuk usage critical.
-                                with open('data/current_profile.json', 'w') as f:
-                                    json.dump(player_info, f, indent=4)
+                                write_json_file('data/current_profile.json', player_info)
 
                             return True
                         else:
@@ -753,15 +747,14 @@ class WDBot:
         except Exception as e:
             print(f"{Fore.RED}[!] Gagal fetch base info: {e}{Style.RESET_ALL}")
 
-        if os.path.exists('data/current_profile.json'):
+        profile_data = read_json_file('data/current_profile.json', default=None)
+        if profile_data:
             try:
-                with open('data/current_profile.json', 'r') as f:
-                    pInfo = json.load(f)
-                print(f"Nickname : {pInfo.get('nickName')}")
+                print(f"Nickname : {profile_data.get('nickName')}")
                 print(f"Full Name: {real_name}")
-                print(f"Email    : {pInfo.get('mailAddress')}")
-                print(f"Mobile   : {pInfo.get('mobile')}")
-                print(f"Currency : {pInfo.get('currencyCode')} ({pInfo.get('icon')})")
+                print(f"Email    : {profile_data.get('mailAddress')}")
+                print(f"Mobile   : {profile_data.get('mobile')}")
+                print(f"Currency : {profile_data.get('currencyCode')} ({profile_data.get('icon')})")
             except Exception as e:
                 print(f"{Fore.RED}[!] Gagal baca current_profile.json: {e}{Style.RESET_ALL}")
         else:
