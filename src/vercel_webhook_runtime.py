@@ -1,16 +1,17 @@
 import asyncio
+import json
 import os
 import threading
 from pathlib import Path
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from dotenv import load_dotenv
-from telegram import Update
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
 from storage_backend import read_json_file
-from telegram_bot import create_application_for_user
 
 _RUNNER = asyncio.Runner()
 _RUN_LOCK = threading.Lock()
@@ -82,8 +83,88 @@ def _resolve_webhook_user_config():
     return user_config
 
 
+def _resolve_bot_token_for_api():
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if token:
+        return token
+
+    users = _load_users()
+    preferred_username = os.getenv("WDBOT_DEFAULT_USERNAME", "").strip()
+
+    if preferred_username:
+        for user in users:
+            if user.get("username") == preferred_username:
+                preferred_token = (user.get("telegram_bot_token") or "").strip()
+                if preferred_token:
+                    return preferred_token
+
+    for user in users:
+        candidate = (user.get("telegram_bot_token") or "").strip()
+        if candidate:
+            return candidate
+
+    return ""
+
+
+def _resolve_username_hint():
+    preferred_username = os.getenv("WDBOT_DEFAULT_USERNAME", "").strip()
+    if preferred_username:
+        return preferred_username
+
+    users = _load_users()
+    for user in users:
+        username = (user.get("username") or "").strip()
+        if username:
+            return username
+
+    return "default"
+
+
+def _telegram_api_call(method, payload=None):
+    token = _resolve_bot_token_for_api()
+    if not token:
+        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN for webhook mode.")
+
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    body = None
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+
+    req = urllib_request.Request(
+        url=url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST" if body is not None else "GET",
+    )
+
+    try:
+        with urllib_request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib_error.HTTPError as e:
+        try:
+            raw = e.read().decode("utf-8")
+            parsed = json.loads(raw)
+            raise RuntimeError(parsed.get("description") or f"HTTP {e.code}") from e
+        except Exception:
+            raise RuntimeError(f"Telegram API HTTP Error: {e.code}") from e
+    except Exception as e:
+        raise RuntimeError(f"Telegram API request failed: {e}") from e
+
+    try:
+        parsed = json.loads(raw)
+    except Exception as e:
+        raise RuntimeError("Telegram API returned invalid JSON.") from e
+
+    if not parsed.get("ok"):
+        raise RuntimeError(parsed.get("description") or f"Telegram API method '{method}' failed.")
+
+    return parsed.get("result")
+
+
 async def _build_initialized_application():
     user_config = _resolve_webhook_user_config()
+    from telegram_bot import create_application_for_user
+
     app = create_application_for_user(
         user_config,
         ensure_login_on_start=False,
@@ -112,6 +193,18 @@ def _ensure_application():
 def _webhook_info_to_dict(info):
     if not info:
         return {}
+
+    if isinstance(info, dict):
+        return {
+            "url": info.get("url", ""),
+            "pending_update_count": info.get("pending_update_count", 0),
+            "has_custom_certificate": info.get("has_custom_certificate", False),
+            "last_error_date": info.get("last_error_date", None),
+            "last_error_message": info.get("last_error_message", None),
+            "max_connections": info.get("max_connections", None),
+            "ip_address": info.get("ip_address", None),
+        }
+
     return {
         "url": getattr(info, "url", ""),
         "pending_update_count": getattr(info, "pending_update_count", 0),
@@ -125,6 +218,7 @@ def _webhook_info_to_dict(info):
 
 def process_update_payload(payload):
     app, user_config = _ensure_application()
+    from telegram import Update
 
     async def _process():
         update = Update.de_json(payload, app.bot)
@@ -137,42 +231,32 @@ def process_update_payload(payload):
 
 
 def set_webhook(webhook_url):
-    app, _ = _ensure_application()
     secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip() or None
+    payload = {"url": webhook_url}
+    if secret:
+        payload["secret_token"] = secret
 
-    async def _set():
-        ok = await app.bot.set_webhook(url=webhook_url, secret_token=secret)
-        info = await app.bot.get_webhook_info()
-        return ok, info
-
-    ok, info = _run(_set())
+    ok = _telegram_api_call("setWebhook", payload=payload)
+    info = _telegram_api_call("getWebhookInfo")
     return {"ok": bool(ok), "webhook": _webhook_info_to_dict(info)}
 
 
 def delete_webhook(drop_pending_updates=False):
-    app, _ = _ensure_application()
-
-    async def _delete():
-        ok = await app.bot.delete_webhook(drop_pending_updates=drop_pending_updates)
-        info = await app.bot.get_webhook_info()
-        return ok, info
-
-    ok, info = _run(_delete())
+    ok = _telegram_api_call(
+        "deleteWebhook",
+        payload={"drop_pending_updates": bool(drop_pending_updates)},
+    )
+    info = _telegram_api_call("getWebhookInfo")
     return {"ok": bool(ok), "webhook": _webhook_info_to_dict(info)}
 
 
 def get_webhook_info():
-    app, user_config = _ensure_application()
-
-    async def _info():
-        info = await app.bot.get_webhook_info()
-        me = await app.bot.get_me()
-        return info, me
-
-    info, me = _run(_info())
+    username_hint = _resolve_username_hint()
+    info = _telegram_api_call("getWebhookInfo")
+    me = _telegram_api_call("getMe")
     return {
-        "username": user_config.get("username"),
-        "bot_username": getattr(me, "username", None),
-        "bot_id": getattr(me, "id", None),
+        "username": username_hint,
+        "bot_username": me.get("username") if isinstance(me, dict) else None,
+        "bot_id": me.get("id") if isinstance(me, dict) else None,
         "webhook": _webhook_info_to_dict(info),
     }
