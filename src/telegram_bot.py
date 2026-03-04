@@ -268,6 +268,65 @@ def update_transaction_status(username, order_id, status, payment_time=None):
     if updated:
         save_history(username, history)
 
+
+def get_deposit_state_file(username):
+    safe_username = username or "default"
+    return f"data/deposit_state_{safe_username}.json"
+
+
+def load_deposit_state(username):
+    state_file = get_deposit_state_file(username)
+    data = read_json_file(state_file, default={})
+    return data if isinstance(data, dict) else {}
+
+
+def save_deposit_state(username, state):
+    state_file = get_deposit_state_file(username)
+    write_json_file(state_file, state)
+
+
+def set_pending_deposit_input(username, chat_id, prompt_message_id=None, requested_by=None):
+    if chat_id is None:
+        return
+
+    state = load_deposit_state(username)
+    state[str(chat_id)] = {
+        "awaiting_nominal": True,
+        "prompt_message_id": prompt_message_id,
+        "requested_by": str(requested_by) if requested_by is not None else None,
+        "created_at": int(time.time()),
+    }
+    save_deposit_state(username, state)
+
+
+def get_pending_deposit_input(username, chat_id):
+    if chat_id is None:
+        return None
+
+    state = load_deposit_state(username)
+    item = state.get(str(chat_id))
+    if not isinstance(item, dict) or not item.get("awaiting_nominal"):
+        return None
+
+    created_at = int(item.get("created_at", 0) or 0)
+    if created_at and (time.time() - created_at) > 1800:
+        # Auto-expire stale pending state after 30 minutes.
+        state.pop(str(chat_id), None)
+        save_deposit_state(username, state)
+        return None
+
+    return item
+
+
+def clear_pending_deposit_input(username, chat_id):
+    if chat_id is None:
+        return
+
+    state = load_deposit_state(username)
+    if str(chat_id) in state:
+        state.pop(str(chat_id), None)
+        save_deposit_state(username, state)
+
 async def show_main_menu(query, context):
     wd_bot = context.bot_data['wd_bot']
     
@@ -846,6 +905,10 @@ async def settings_upload_logo_input(update: Update, context: ContextTypes.DEFAU
 async def deposit_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    wd_bot = context.bot_data.get('wd_bot')
+    chat_id = query.message.chat_id if query and query.message else None
+    if wd_bot:
+        clear_pending_deposit_input(wd_bot.current_username, chat_id)
     await show_guest_dashboard(query, context)
     return ConversationHandler.END
 
@@ -869,10 +932,21 @@ async def deposit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
     context.user_data['deposit_prompt_msg_id'] = msg_prompt.message_id
+    set_pending_deposit_input(
+        wd_bot.current_username,
+        query.message.chat_id if query.message else None,
+        prompt_message_id=msg_prompt.message_id,
+        requested_by=query.from_user.id if query.from_user else None,
+    )
     return DEPOSIT_NOMINAL
 
 async def deposit_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+    if not update.message:
+        return ConversationHandler.END
+
+    wd_bot = context.bot_data['wd_bot']
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    text = (update.message.text or "").strip()
     try:
         nominal = int(text)
         if nominal < 10000:
@@ -885,19 +959,26 @@ async def deposit_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Cleanup: Delete user input and prompt message
     try:
         await update.message.delete()
-    except: pass
+    except Exception:
+        pass
 
-    if 'deposit_prompt_msg_id' in context.user_data:
+    pending_state = get_pending_deposit_input(wd_bot.current_username, chat_id)
+    prompt_msg_id = context.user_data.get('deposit_prompt_msg_id')
+    if not prompt_msg_id and pending_state:
+        prompt_msg_id = pending_state.get('prompt_message_id')
+
+    if prompt_msg_id:
         try:
             await context.bot.delete_message(
-                chat_id=update.effective_chat.id, 
-                message_id=context.user_data['deposit_prompt_msg_id']
+                chat_id=chat_id,
+                message_id=prompt_msg_id
             )
-        except: pass
-        del context.user_data['deposit_prompt_msg_id']
+        except Exception:
+            pass
+    context.user_data.pop('deposit_prompt_msg_id', None)
+    clear_pending_deposit_input(wd_bot.current_username, chat_id)
 
-    msg = await update.message.reply_text("⏳ Memproses permintaan pembayaran...")
-    wd_bot = context.bot_data['wd_bot']
+    msg = await update.message.reply_text("Memproses permintaan pembayaran...")
 
     # 1. Check QRIS Type (Simplified)
     qris_type = "P2M"
@@ -913,7 +994,8 @@ async def deposit_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
             d = resp.json()
             if d.get('success') and d.get('result'):
                 qris_type = d.get('result')
-    except: pass
+    except Exception:
+        pass
 
     # 2. Request Deposit
     url_deposit = wd_bot._api_url("/auth/commonpay/ida/common/getYukkQris?l=id")
@@ -1007,7 +1089,7 @@ async def deposit_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 # Start Polling Task
                 context.application.create_task(
-                    poll_deposit_status(update.effective_chat.id, order_id, context, qris_msg.message_id, nominal)
+                    poll_deposit_status(chat_id, order_id, context, qris_msg.message_id, nominal)
                 )
                 
                 return ConversationHandler.END
@@ -1019,6 +1101,35 @@ async def deposit_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Error: {str(e)}")
 
     return ConversationHandler.END
+
+async def deposit_stateless_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Serverless-safe router for nominal input.
+    Conversation state may be lost across webhook invocations.
+    """
+    if not update.message or not update.message.text:
+        return
+
+    # When ConversationHandler is intact in polling mode, let it handle messages.
+    if 'deposit_prompt_msg_id' in context.user_data:
+        return
+
+    wd_bot = context.bot_data.get('wd_bot')
+    if not wd_bot or not update.effective_chat:
+        return
+
+    chat_id = update.effective_chat.id
+    pending_state = get_pending_deposit_input(wd_bot.current_username, chat_id)
+    if not pending_state:
+        return
+
+    requested_by = str(pending_state.get('requested_by') or '')
+    if requested_by and update.effective_user and str(update.effective_user.id) != requested_by:
+        await update.message.reply_text("Nominal hanya bisa diisi oleh user yang memulai pembayaran.")
+        return
+
+    await deposit_process(update, context)
+
 
 async def poll_deposit_status(chat_id, order_id, context, message_id, nominal=0):
     timeout = 300
@@ -1621,6 +1732,8 @@ def create_application_for_user(user_config, ensure_login_on_start=True, enable_
     application.add_handler(conv_deposit)
     application.add_handler(conv_manage)
     application.add_handler(conv_settings)
+    # Webhook/serverless fallback for deposit nominal input when conversation state is lost.
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, deposit_stateless_text_router))
     application.add_handler(CallbackQueryHandler(button_handler))
 
     return application

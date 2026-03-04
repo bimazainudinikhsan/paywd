@@ -480,12 +480,17 @@ class WDBot:
         self.token = token
         
         # Save to user-specific file if username exists, else legacy
-        if self.current_username:
-            with open(f'config/auth_token_{self.current_username}.txt', 'w') as f:
-                f.write(token)
-        else:
-            with open('config/auth_token.txt', 'w') as f:
-                f.write(token)
+        try:
+            if self.current_username:
+                with open(f'config/auth_token_{self.current_username}.txt', 'w') as f:
+                    f.write(token)
+            else:
+                with open('config/auth_token.txt', 'w') as f:
+                    f.write(token)
+        except Exception as e:
+            # In serverless environments (e.g. Vercel), project filesystem is read-only.
+            # Keep token in memory and credentials storage even when file write fails.
+            print(f"{Fore.YELLOW}[!] Warning: gagal simpan token ke file lokal: {e}{Style.RESET_ALL}")
                 
         self.session.headers.update({"X-Access-Token": token})
         
